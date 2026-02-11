@@ -245,7 +245,7 @@ tailwind.config = {
 <script>
 // ── State ──
 const state = {
-  layers: [],          // { id, img, canvas, ctx, x, y, scale, origData, name }
+  layers: [],          // { id, img, canvas, ctx, x, y, scale, rotation, origData, name }
   selectedId: null,
   tool: 'move',        // 'move' | 'erase' | 'restore'
   brushSize: 20,
@@ -257,12 +257,18 @@ const state = {
   layerStartX: 0, layerStartY: 0,
   painting: false,
   lastPaintX: 0, lastPaintY: 0,
-  // Pinch
+  // Pinch + rotate
   pinching: false,
   pinchStartDist: 0,
   pinchStartScale: 1,
+  pinchStartAngle: 0,
+  pinchStartRotation: 0,
   pinchMidX: 0, pinchMidY: 0,
 };
+
+function layerTransform(l) {
+  return `translate(${l.x}px, ${l.y}px) scale(${l.scale}) rotate(${l.rotation}deg)`;
+}
 
 const area = document.getElementById('canvas-area');
 const emptyState = document.getElementById('empty-state');
@@ -316,11 +322,12 @@ function addLayer(img, name) {
   const x = (areaRect.width - img.width * scale) / 2 + (state.layers.length * 20);
   const y = (areaRect.height - img.height * scale) / 2 + (state.layers.length * 20);
 
-  canvas.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  const rotation = 0;
+  canvas.style.transform = `translate(${x}px, ${y}px) scale(${scale}) rotate(${rotation}deg)`;
 
   const shortName = name.length > 18 ? name.slice(0, 15) + '...' : name;
 
-  const layer = { id, img, canvas, ctx, x, y, scale, origData, name: shortName };
+  const layer = { id, img, canvas, ctx, x, y, scale, rotation, origData, name: shortName };
   state.layers.push(layer);
   area.appendChild(canvas);
 
@@ -536,7 +543,7 @@ area.addEventListener('pointermove', (e) => {
     const dy = e.clientY - state.dragStartY;
     sel.x = state.layerStartX + dx;
     sel.y = state.layerStartY + dy;
-    sel.canvas.style.transform = `translate(${sel.x}px, ${sel.y}px) scale(${sel.scale})`;
+    sel.canvas.style.transform = layerTransform(sel);
   }
 
   if (state.painting) {
@@ -563,6 +570,10 @@ area.addEventListener('pointerleave', () => {
 });
 
 // ── Touch: pinch to scale ──
+function touchAngle(t0, t1) {
+  return Math.atan2(t1.clientY - t0.clientY, t1.clientX - t0.clientX) * (180 / Math.PI);
+}
+
 area.addEventListener('touchstart', (e) => {
   if (e.touches.length === 2 && state.tool === 'move') {
     e.preventDefault();
@@ -573,6 +584,8 @@ area.addEventListener('touchstart', (e) => {
     const t0 = e.touches[0], t1 = e.touches[1];
     state.pinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
     state.pinchStartScale = sel.scale;
+    state.pinchStartAngle = touchAngle(t0, t1);
+    state.pinchStartRotation = sel.rotation;
     state.pinchMidX = (t0.clientX + t1.clientX) / 2;
     state.pinchMidY = (t0.clientY + t1.clientY) / 2;
   }
@@ -584,10 +597,14 @@ area.addEventListener('touchmove', (e) => {
     const sel = getSelected();
     if (!sel) return;
     const t0 = e.touches[0], t1 = e.touches[1];
+    // Scale
     const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
     const ratio = dist / state.pinchStartDist;
     sel.scale = Math.max(0.05, state.pinchStartScale * ratio);
-    sel.canvas.style.transform = `translate(${sel.x}px, ${sel.y}px) scale(${sel.scale})`;
+    // Rotation
+    const angle = touchAngle(t0, t1);
+    sel.rotation = state.pinchStartRotation + (angle - state.pinchStartAngle);
+    sel.canvas.style.transform = layerTransform(sel);
   }
 }, { passive: false });
 
@@ -602,7 +619,7 @@ area.addEventListener('wheel', (e) => {
   if (!sel) return;
   const delta = e.deltaY > 0 ? 0.92 : 1.08;
   sel.scale = Math.max(0.05, sel.scale * delta);
-  sel.canvas.style.transform = `translate(${sel.x}px, ${sel.y}px) scale(${sel.scale})`;
+  sel.canvas.style.transform = layerTransform(sel);
 }, { passive: false });
 
 // ── UI updates ──
@@ -673,12 +690,15 @@ function exportCanvas() {
   // Compute bounding box
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   state.layers.forEach(l => {
-    const lx = l.x, ly = l.y;
-    const rw = l.canvas.width * l.scale, rh = l.canvas.height * l.scale;
-    minX = Math.min(minX, lx);
-    minY = Math.min(minY, ly);
-    maxX = Math.max(maxX, lx + rw);
-    maxY = Math.max(maxY, ly + rh);
+    const sw = l.canvas.width * l.scale, sh = l.canvas.height * l.scale;
+    const cx = l.x + sw / 2, cy = l.y + sh / 2;
+    const rad = l.rotation * Math.PI / 180;
+    const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+    const bw = sw * cos + sh * sin, bh = sw * sin + sh * cos;
+    minX = Math.min(minX, cx - bw / 2);
+    minY = Math.min(minY, cy - bh / 2);
+    maxX = Math.max(maxX, cx + bw / 2);
+    maxY = Math.max(maxY, cy + bh / 2);
   });
 
   const w = Math.ceil(maxX - minX);
@@ -690,7 +710,13 @@ function exportCanvas() {
   state.layers.forEach(l => {
     const dx = l.x - minX;
     const dy = l.y - minY;
-    ectx.drawImage(l.canvas, dx, dy, l.canvas.width * l.scale, l.canvas.height * l.scale);
+    const sw = l.canvas.width * l.scale;
+    const sh = l.canvas.height * l.scale;
+    ectx.save();
+    ectx.translate(dx + sw / 2, dy + sh / 2);
+    ectx.rotate(l.rotation * Math.PI / 180);
+    ectx.drawImage(l.canvas, -sw / 2, -sh / 2, sw, sh);
+    ectx.restore();
   });
 
   const link = document.createElement('a');
