@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Overlay — Layer Editor</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Space+Grotesk:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        surface: { 50: '#1a1a1e', 100: '#222226', 200: '#2a2a2f', 300: '#35353b', 400: '#45454d' },
+        accent: { main: '#e8ff5a', dim: '#b8cc47', glow: 'rgba(232,255,90,0.15)' },
+        erase: { main: '#ff5a7a', dim: '#cc4762' },
+        restore: { main: '#5ae8ff', dim: '#47b8cc' },
+      }
+    }
+  }
+}
+</script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { overflow: hidden; height: 100%; height: 100dvh; touch-action: none; }
+  body { font-family: 'IBM Plex Sans', sans-serif; background: #131316; color: #e0e0e0; }
+
+  .font-mono { font-family: 'DM Mono', monospace; }
+  .font-display { font-family: 'IBM Plex Sans', sans-serif; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #35353b; border-radius: 4px; }
+
+  /* Canvas area */
+  #canvas-area { position: relative; overflow: hidden; touch-action: none; }
+  .layer-canvas {
+    position: absolute; top: 0; left: 0;
+    transform-origin: 0 0;
+    cursor: grab;
+    will-change: transform;
+    image-rendering: -webkit-optimize-contrast;
+  }
+  .layer-canvas.selected { outline: 2px solid #e8ff5a; outline-offset: -1px; }
+  .layer-canvas.erasing { cursor: crosshair; }
+
+  /* Toolbar */
+  .tool-btn {
+    width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 10px; border: 1.5px solid transparent;
+    transition: all 0.15s ease;
+    position: relative;
+    background: #222226;
+  }
+  .tool-btn:hover { background: #2a2a2f; }
+  .tool-btn.active { border-color: #e8ff5a; background: rgba(232,255,90,0.08); }
+  .tool-btn.active-erase { border-color: #ff5a7a; background: rgba(255,90,122,0.08); }
+  .tool-btn.active-restore { border-color: #5ae8ff; background: rgba(90,232,255,0.08); }
+  .tool-btn svg { width: 20px; height: 20px; }
+
+  /* Layer item */
+  .layer-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 8px;
+    cursor: pointer; transition: all 0.12s ease;
+    border: 1.5px solid transparent;
+    background: #1a1a1e;
+  }
+  .layer-item:hover { background: #222226; }
+  .layer-item.selected { border-color: #e8ff5a; background: rgba(232,255,90,0.05); }
+  .layer-item .thumb {
+    width: 36px; height: 36px; border-radius: 5px;
+    background: #2a2a2f; overflow: hidden; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .layer-item .thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+  /* Eraser cursor preview */
+  #eraser-cursor {
+    position: fixed; pointer-events: none; z-index: 9999;
+    border-radius: 50%; border: 2px solid #ff5a7a;
+    transform: translate(-50%, -50%);
+    display: none;
+    transition: width 0.1s, height 0.1s;
+  }
+  #eraser-cursor.restore-mode { border-color: #5ae8ff; }
+
+  /* Size slider */
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; border-radius: 2px;
+    background: #35353b; outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #e8ff5a; cursor: pointer; border: none;
+  }
+
+  /* Panel slide */
+  .panel-slide {
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .panel-slide.hidden-panel { transform: translateX(100%); }
+
+  /* Checkerboard for transparency */
+  .checkerboard {
+    background-image:
+      linear-gradient(45deg, #2a2a2f 25%, transparent 25%),
+      linear-gradient(-45deg, #2a2a2f 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #2a2a2f 75%),
+      linear-gradient(-45deg, transparent 75%, #2a2a2f 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+    background-color: #1a1a1e;
+  }
+
+  /* Upload zone */
+  .upload-zone {
+    border: 2px dashed #35353b;
+    border-radius: 16px;
+    transition: all 0.2s ease;
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: #e8ff5a;
+    background: rgba(232,255,90,0.03);
+  }
+
+  /* Notification toast */
+  .toast {
+    animation: toastIn 0.3s ease, toastOut 0.3s ease 1.7s forwards;
+  }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes toastOut { from { opacity: 1; } to { opacity: 0; } }
+
+  /* Reorder arrows */
+  .reorder-btn {
+    width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 5px; background: #2a2a2f;
+    transition: background 0.12s;
+  }
+  .reorder-btn:hover { background: #35353b; }
+  .reorder-btn svg { width: 12px; height: 12px; }
+</style>
+</head>
+<body class="flex flex-col h-full">
+
+<!-- Top Bar -->
+<header class="flex items-center justify-between px-4 py-2.5 bg-surface-100 border-b border-surface-300 z-50 flex-shrink-0" style="min-height:48px">
+  <div class="flex items-center gap-2">
+    <div class="w-6 h-6 rounded-md bg-accent-main flex items-center justify-center">
+      <svg viewBox="0 0 16 16" class="w-3.5 h-3.5" fill="#131316"><rect x="2" y="2" width="6" height="6" rx="1"/><rect x="8" y="8" width="6" height="6" rx="1" opacity="0.6"/></svg>
+    </div>
+    <span class="font-display font-semibold text-sm tracking-tight">Overlay</span>
+  </div>
+
+  <div class="flex items-center gap-1.5">
+    <button onclick="exportCanvas()" class="tool-btn" title="Export">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    </button>
+    <button onclick="toggleLayerPanel()" class="tool-btn" id="layer-panel-toggle" title="Layers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- Main Area -->
+<div class="flex-1 flex overflow-hidden relative">
+
+  <!-- Canvas -->
+  <div id="canvas-area" class="flex-1 checkerboard relative">
+    <!-- Empty state -->
+    <div id="empty-state" class="absolute inset-0 flex items-center justify-center z-10">
+      <label class="upload-zone flex flex-col items-center gap-3 p-8 cursor-pointer" id="upload-zone">
+        <input type="file" accept="image/*" multiple class="hidden" id="file-input" onchange="handleFiles(this.files)">
+        <div class="w-14 h-14 rounded-2xl bg-surface-200 flex items-center justify-center">
+          <svg class="w-7 h-7 text-gray-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14m-7-7h14"/></svg>
+        </div>
+        <div class="text-center">
+          <p class="text-sm font-medium text-gray-400">Drop images or tap to upload</p>
+          <p class="text-xs text-gray-600 mt-1 font-mono">PNG, JPG, WEBP</p>
+        </div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Layer Panel (side) -->
+  <div id="layer-panel" class="panel-slide hidden-panel absolute right-0 top-0 bottom-0 w-64 bg-surface-100 border-l border-surface-300 z-40 flex flex-col">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-surface-300">
+      <span class="text-xs font-mono font-medium text-gray-400 uppercase tracking-wider">Layers</span>
+      <label class="tool-btn" style="width:32px;height:32px;cursor:pointer" title="Add image">
+        <input type="file" accept="image/*" multiple class="hidden" onchange="handleFiles(this.files)">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14m-7-7h14"/></svg>
+      </label>
+    </div>
+    <div id="layer-list" class="flex-1 overflow-y-auto p-2 flex flex-col gap-1.5"></div>
+  </div>
+</div>
+
+<!-- Bottom Toolbar -->
+<footer class="flex-shrink-0 bg-surface-100 border-t border-surface-300 z-50">
+  <div class="flex items-center justify-between px-3 py-2 gap-2">
+    <!-- Left tools -->
+    <div class="flex items-center gap-1.5">
+      <button onclick="setTool('move')" class="tool-btn active" id="tool-move" title="Move / Scale">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3"/><path d="M9 5l3-3 3 3"/><path d="M15 19l-3 3-3-3"/><path d="M19 9l3 3-3 3"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+      </button>
+      <button onclick="setTool('erase')" class="tool-btn" id="tool-erase" title="Eraser">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#ff5a7a" stroke-width="2"><path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8L14.6 1.6c.8-.8 2-.8 2.8 0L21 5.2c.8.8.8 2 0 2.8L11 18"/><path d="M18 13L11 6"/></svg>
+      </button>
+      <button onclick="setTool('restore')" class="tool-btn" id="tool-restore" title="Restore">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#5ae8ff" stroke-width="2"><path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8L14.6 1.6c.8-.8 2-.8 2.8 0L21 5.2c.8.8.8 2 0 2.8L11 18"/><path d="M18 13L11 6"/><line x1="2" y1="2" x2="6" y2="6" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+
+    <!-- Brush size (shown when erase/restore active) -->
+    <div id="brush-controls" class="flex-1 flex items-center gap-3 px-3 max-w-[200px]" style="display:none">
+      <span class="text-[10px] font-mono text-gray-500 flex-shrink-0" id="brush-size-label">20</span>
+      <input type="range" min="5" max="100" value="20" id="brush-size" oninput="updateBrushSize(this.value)">
+    </div>
+
+    <!-- Right tools -->
+    <div class="flex items-center gap-1.5">
+      <label class="tool-btn" style="cursor:pointer" title="Add image">
+        <input type="file" accept="image/*" multiple class="hidden" onchange="handleFiles(this.files)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+      </label>
+      <button onclick="deleteSelected()" class="tool-btn" id="tool-delete" title="Delete layer" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#ff5a7a" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+      </button>
+    </div>
+  </div>
+</footer>
+
+<!-- Eraser cursor -->
+<div id="eraser-cursor"></div>
+
+<!-- Toast container -->
+<div id="toast-container" class="fixed bottom-20 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2"></div>
+
+<script>
+// ── State ──
+const state = {
+  layers: [],          // { id, img, canvas, ctx, x, y, scale, origData, name }
+  selectedId: null,
+  tool: 'move',        // 'move' | 'erase' | 'restore'
+  brushSize: 20,
+  nextId: 1,
+  panelOpen: false,
+  // Interaction state
+  dragging: false,
+  dragStartX: 0, dragStartY: 0,
+  layerStartX: 0, layerStartY: 0,
+  painting: false,
+  lastPaintX: 0, lastPaintY: 0,
+  // Pinch
+  pinching: false,
+  pinchStartDist: 0,
+  pinchStartScale: 1,
+  pinchMidX: 0, pinchMidY: 0,
+};
+
+const area = document.getElementById('canvas-area');
+const emptyState = document.getElementById('empty-state');
+const eraserCursor = document.getElementById('eraser-cursor');
+const uploadZone = document.getElementById('upload-zone');
+
+// ── File handling ──
+function handleFiles(files) {
+  if (!files.length) return;
+  Array.from(files).forEach(f => {
+    if (!f.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => addLayer(img, f.name);
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(f);
+  });
+}
+
+// Drag & drop on canvas area
+area.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone?.classList.add('drag-over'); });
+area.addEventListener('dragleave', () => { uploadZone?.classList.remove('drag-over'); });
+area.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadZone?.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+
+// ── Layer management ──
+function addLayer(img, name) {
+  const id = state.nextId++;
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  canvas.className = 'layer-canvas';
+  canvas.dataset.layerId = id;
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+
+  // Save original pixel data for restore
+  const origData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+  // Position: center in viewport, scale to fit
+  const areaRect = area.getBoundingClientRect();
+  const maxW = areaRect.width * 0.7;
+  const maxH = areaRect.height * 0.7;
+  const scale = Math.min(1, maxW / img.width, maxH / img.height);
+  const x = (areaRect.width - img.width * scale) / 2 + (state.layers.length * 20);
+  const y = (areaRect.height - img.height * scale) / 2 + (state.layers.length * 20);
+
+  canvas.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+
+  const shortName = name.length > 18 ? name.slice(0, 15) + '...' : name;
+
+  const layer = { id, img, canvas, ctx, x, y, scale, origData, name: shortName };
+  state.layers.push(layer);
+  area.appendChild(canvas);
+
+  selectLayer(id);
+  updateUI();
+  toast(`Added "${shortName}"`);
+}
+
+function selectLayer(id) {
+  state.selectedId = id;
+  state.layers.forEach(l => l.canvas.classList.toggle('selected', l.id === id));
+  // Bring selected to visual top but keep array order for z
+  updateZOrder();
+  updateUI();
+}
+
+function updateZOrder() {
+  state.layers.forEach((l, i) => {
+    l.canvas.style.zIndex = i + 1;
+  });
+  // Selected gets highest z within its position
+  const sel = getSelected();
+  if (sel) {
+    // Don't change array order, just ensure the canvas reflects array order
+    state.layers.forEach((l, i) => {
+      l.canvas.style.zIndex = i + 1;
+    });
+  }
+}
+
+function getSelected() {
+  return state.layers.find(l => l.id === state.selectedId) || null;
+}
+
+function deleteSelected() {
+  const sel = getSelected();
+  if (!sel) return;
+  sel.canvas.remove();
+  state.layers = state.layers.filter(l => l.id !== sel.id);
+  state.selectedId = state.layers.length ? state.layers[state.layers.length - 1].id : null;
+  if (state.selectedId) selectLayer(state.selectedId);
+  updateUI();
+  toast('Layer deleted');
+}
+
+function moveLayerUp(id) {
+  const idx = state.layers.findIndex(l => l.id === id);
+  if (idx < state.layers.length - 1) {
+    [state.layers[idx], state.layers[idx + 1]] = [state.layers[idx + 1], state.layers[idx]];
+    updateZOrder();
+    updateUI();
+  }
+}
+
+function moveLayerDown(id) {
+  const idx = state.layers.findIndex(l => l.id === id);
+  if (idx > 0) {
+    [state.layers[idx], state.layers[idx - 1]] = [state.layers[idx - 1], state.layers[idx]];
+    updateZOrder();
+    updateUI();
+  }
+}
+
+// ── Tools ──
+function setTool(tool) {
+  state.tool = tool;
+  document.getElementById('tool-move').classList.toggle('active', tool === 'move');
+  document.getElementById('tool-erase').classList.toggle('active-erase', tool === 'erase');
+  document.getElementById('tool-restore').classList.toggle('active-restore', tool === 'restore');
+
+  document.getElementById('brush-controls').style.display = (tool === 'erase' || tool === 'restore') ? 'flex' : 'none';
+
+  state.layers.forEach(l => {
+    l.canvas.classList.toggle('erasing', tool !== 'move');
+  });
+
+  eraserCursor.className = tool === 'restore' ? 'restore-mode' : '';
+  if (tool === 'move') eraserCursor.style.display = 'none';
+}
+
+function updateBrushSize(val) {
+  state.brushSize = parseInt(val);
+  document.getElementById('brush-size-label').textContent = val;
+  const s = state.brushSize * 2;
+  eraserCursor.style.width = s + 'px';
+  eraserCursor.style.height = s + 'px';
+}
+
+// ── Pointer events on canvas area ──
+function getLayerAt(clientX, clientY) {
+  // Check from top (highest z) to bottom
+  for (let i = state.layers.length - 1; i >= 0; i--) {
+    const l = state.layers[i];
+    const rect = l.canvas.getBoundingClientRect();
+    if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+      return l;
+    }
+  }
+  return null;
+}
+
+function canvasCoords(layer, clientX, clientY) {
+  // Convert client coords to canvas pixel coords
+  const rect = layer.canvas.getBoundingClientRect();
+  const scaleX = layer.canvas.width / rect.width;
+  const scaleY = layer.canvas.height / rect.height;
+  return {
+    x: (clientX - rect.left) * scaleX,
+    y: (clientY - rect.top) * scaleY
+  };
+}
+
+function paintAt(layer, cx, cy, erase) {
+  const ctx = layer.ctx;
+  const r = state.brushSize * (layer.canvas.width / (layer.canvas.getBoundingClientRect().width));
+
+  if (erase) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  } else {
+    // Restore from original data
+    const origCtx = document.createElement('canvas').getContext('2d');
+    origCtx.canvas.width = layer.canvas.width;
+    origCtx.canvas.height = layer.canvas.height;
+    origCtx.putImageData(layer.origData, 0, 0);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    // Create a clipping circle
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(origCtx.canvas, 0, 0);
+    ctx.restore();
+  }
+}
+
+function paintLine(layer, x0, y0, x1, y1, erase) {
+  const dist = Math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2);
+  const steps = Math.max(1, Math.floor(dist / 3));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = x0 + (x1 - x0) * t;
+    const y = y0 + (y1 - y0) * t;
+    paintAt(layer, x, y, erase);
+  }
+}
+
+// Pointer handling
+let activeTouches = {};
+
+area.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('#layer-panel') || e.target.closest('#empty-state')) return;
+
+  const layer = getLayerAt(e.clientX, e.clientY);
+
+  if (state.tool === 'move') {
+    if (layer) {
+      selectLayer(layer.id);
+      state.dragging = true;
+      state.dragStartX = e.clientX;
+      state.dragStartY = e.clientY;
+      state.layerStartX = layer.x;
+      state.layerStartY = layer.y;
+      layer.canvas.style.cursor = 'grabbing';
+      area.setPointerCapture(e.pointerId);
+    } else {
+      state.selectedId = null;
+      state.layers.forEach(l => l.canvas.classList.remove('selected'));
+      updateUI();
+    }
+  } else {
+    // Erase / Restore
+    const sel = getSelected();
+    if (!sel) {
+      if (layer) selectLayer(layer.id);
+      return;
+    }
+    // Only paint on selected layer
+    const rect = sel.canvas.getBoundingClientRect();
+    if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+      state.painting = true;
+      const c = canvasCoords(sel, e.clientX, e.clientY);
+      state.lastPaintX = c.x;
+      state.lastPaintY = c.y;
+      paintAt(sel, c.x, c.y, state.tool === 'erase');
+      area.setPointerCapture(e.pointerId);
+    } else if (layer) {
+      selectLayer(layer.id);
+    }
+  }
+});
+
+area.addEventListener('pointermove', (e) => {
+  // Eraser cursor
+  if (state.tool !== 'move') {
+    const s = state.brushSize * 2;
+    eraserCursor.style.display = 'block';
+    eraserCursor.style.left = e.clientX + 'px';
+    eraserCursor.style.top = e.clientY + 'px';
+    eraserCursor.style.width = s + 'px';
+    eraserCursor.style.height = s + 'px';
+  }
+
+  if (state.tool === 'move' && state.dragging) {
+    const sel = getSelected();
+    if (!sel) return;
+    const dx = e.clientX - state.dragStartX;
+    const dy = e.clientY - state.dragStartY;
+    sel.x = state.layerStartX + dx;
+    sel.y = state.layerStartY + dy;
+    sel.canvas.style.transform = `translate(${sel.x}px, ${sel.y}px) scale(${sel.scale})`;
+  }
+
+  if (state.painting) {
+    const sel = getSelected();
+    if (!sel) return;
+    const c = canvasCoords(sel, e.clientX, e.clientY);
+    paintLine(sel, state.lastPaintX, state.lastPaintY, c.x, c.y, state.tool === 'erase');
+    state.lastPaintX = c.x;
+    state.lastPaintY = c.y;
+  }
+});
+
+area.addEventListener('pointerup', (e) => {
+  if (state.dragging) {
+    const sel = getSelected();
+    if (sel) sel.canvas.style.cursor = 'grab';
+  }
+  state.dragging = false;
+  state.painting = false;
+});
+
+area.addEventListener('pointerleave', () => {
+  eraserCursor.style.display = 'none';
+});
+
+// ── Touch: pinch to scale ──
+area.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2 && state.tool === 'move') {
+    e.preventDefault();
+    const sel = getSelected();
+    if (!sel) return;
+    state.pinching = true;
+    state.dragging = false;
+    const t0 = e.touches[0], t1 = e.touches[1];
+    state.pinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    state.pinchStartScale = sel.scale;
+    state.pinchMidX = (t0.clientX + t1.clientX) / 2;
+    state.pinchMidY = (t0.clientY + t1.clientY) / 2;
+  }
+}, { passive: false });
+
+area.addEventListener('touchmove', (e) => {
+  if (state.pinching && e.touches.length === 2) {
+    e.preventDefault();
+    const sel = getSelected();
+    if (!sel) return;
+    const t0 = e.touches[0], t1 = e.touches[1];
+    const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    const ratio = dist / state.pinchStartDist;
+    sel.scale = Math.max(0.05, state.pinchStartScale * ratio);
+    sel.canvas.style.transform = `translate(${sel.x}px, ${sel.y}px) scale(${sel.scale})`;
+  }
+}, { passive: false });
+
+area.addEventListener('touchend', (e) => {
+  if (e.touches.length < 2) state.pinching = false;
+});
+
+// ── Mouse wheel zoom ──
+area.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const sel = getSelected();
+  if (!sel) return;
+  const delta = e.deltaY > 0 ? 0.92 : 1.08;
+  sel.scale = Math.max(0.05, sel.scale * delta);
+  sel.canvas.style.transform = `translate(${sel.x}px, ${sel.y}px) scale(${sel.scale})`;
+}, { passive: false });
+
+// ── UI updates ──
+function updateUI() {
+  // Empty state
+  emptyState.style.display = state.layers.length ? 'none' : 'flex';
+
+  // Delete button
+  document.getElementById('tool-delete').style.display = state.selectedId ? 'flex' : 'none';
+
+  // Layer panel
+  renderLayerPanel();
+}
+
+function renderLayerPanel() {
+  const list = document.getElementById('layer-list');
+  list.innerHTML = '';
+
+  // Render in reverse so highest z is at top
+  for (let i = state.layers.length - 1; i >= 0; i--) {
+    const l = state.layers[i];
+    const item = document.createElement('div');
+    item.className = 'layer-item' + (l.id === state.selectedId ? ' selected' : '');
+    item.innerHTML = `
+      <div class="thumb"><canvas width="36" height="36" data-thumb="${l.id}"></canvas></div>
+      <div class="flex-1 min-w-0">
+        <p class="text-xs font-mono truncate text-gray-300">${l.name}</p>
+        <p class="text-[10px] font-mono text-gray-600">${l.canvas.width}×${l.canvas.height}</p>
+      </div>
+      <div class="flex flex-col gap-0.5 flex-shrink-0">
+        <button class="reorder-btn" onclick="event.stopPropagation(); moveLayerUp(${l.id})" title="Move up">
+          <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 8l4-4 4 4"/></svg>
+        </button>
+        <button class="reorder-btn" onclick="event.stopPropagation(); moveLayerDown(${l.id})" title="Move down">
+          <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4l4 4 4-4"/></svg>
+        </button>
+      </div>
+    `;
+    item.addEventListener('click', () => selectLayer(l.id));
+    list.appendChild(item);
+
+    // Draw thumbnail
+    const tc = item.querySelector(`canvas[data-thumb="${l.id}"]`);
+    const tctx = tc.getContext('2d');
+    const tw = 36, th = 36;
+    const imgRatio = l.canvas.width / l.canvas.height;
+    let dw, dh, dx, dy;
+    if (imgRatio > 1) {
+      dw = tw; dh = tw / imgRatio; dx = 0; dy = (th - dh) / 2;
+    } else {
+      dh = th; dw = th * imgRatio; dy = 0; dx = (tw - dw) / 2;
+    }
+    tctx.clearRect(0, 0, tw, th);
+    tctx.drawImage(l.canvas, dx, dy, dw, dh);
+  }
+}
+
+function toggleLayerPanel() {
+  state.panelOpen = !state.panelOpen;
+  const panel = document.getElementById('layer-panel');
+  panel.classList.toggle('hidden-panel', !state.panelOpen);
+  document.getElementById('layer-panel-toggle').classList.toggle('active', state.panelOpen);
+}
+
+// ── Export ──
+function exportCanvas() {
+  if (!state.layers.length) { toast('Nothing to export'); return; }
+  // Compute bounding box
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  state.layers.forEach(l => {
+    const lx = l.x, ly = l.y;
+    const rw = l.canvas.width * l.scale, rh = l.canvas.height * l.scale;
+    minX = Math.min(minX, lx);
+    minY = Math.min(minY, ly);
+    maxX = Math.max(maxX, lx + rw);
+    maxY = Math.max(maxY, ly + rh);
+  });
+
+  const w = Math.ceil(maxX - minX);
+  const h = Math.ceil(maxY - minY);
+  const exp = document.createElement('canvas');
+  exp.width = w; exp.height = h;
+  const ectx = exp.getContext('2d');
+
+  state.layers.forEach(l => {
+    const dx = l.x - minX;
+    const dy = l.y - minY;
+    ectx.drawImage(l.canvas, dx, dy, l.canvas.width * l.scale, l.canvas.height * l.scale);
+  });
+
+  const link = document.createElement('a');
+  link.download = 'overlay-export.png';
+  link.href = exp.toDataURL('image/png');
+  link.click();
+  toast('Exported!');
+}
+
+// ── Toast ──
+function toast(msg) {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast px-4 py-2 bg-surface-200 border border-surface-300 rounded-lg text-xs font-mono text-gray-300 shadow-lg';
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 2200);
+}
+
+// ── Init ──
+updateUI();
+updateBrushSize(20);
+</script>
+</body>
+</html>
