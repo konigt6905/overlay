@@ -332,6 +332,7 @@ function addLayer(img, name) {
   area.appendChild(canvas);
 
   selectLayer(id);
+  if (!state.panelOpen) toggleLayerPanel();
   updateUI();
   toast(`Added "${shortName}"`);
 }
@@ -486,31 +487,23 @@ let activeTouches = {};
 area.addEventListener('pointerdown', (e) => {
   if (e.target.closest('#layer-panel') || e.target.closest('#empty-state')) return;
 
-  const layer = getLayerAt(e.clientX, e.clientY);
+  const sel = getSelected();
+  if (!sel) return;
 
   if (state.tool === 'move') {
-    if (layer) {
-      selectLayer(layer.id);
+    // Only drag the already-selected layer
+    const rect = sel.canvas.getBoundingClientRect();
+    if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
       state.dragging = true;
       state.dragStartX = e.clientX;
       state.dragStartY = e.clientY;
-      state.layerStartX = layer.x;
-      state.layerStartY = layer.y;
-      layer.canvas.style.cursor = 'grabbing';
+      state.layerStartX = sel.x;
+      state.layerStartY = sel.y;
+      sel.canvas.style.cursor = 'grabbing';
       area.setPointerCapture(e.pointerId);
-    } else {
-      state.selectedId = null;
-      state.layers.forEach(l => l.canvas.classList.remove('selected'));
-      updateUI();
     }
   } else {
-    // Erase / Restore
-    const sel = getSelected();
-    if (!sel) {
-      if (layer) selectLayer(layer.id);
-      return;
-    }
-    // Only paint on selected layer
+    // Erase / Restore — only paint on selected layer
     const rect = sel.canvas.getBoundingClientRect();
     if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
       state.painting = true;
@@ -519,8 +512,6 @@ area.addEventListener('pointerdown', (e) => {
       state.lastPaintY = c.y;
       paintAt(sel, c.x, c.y, state.tool === 'erase');
       area.setPointerCapture(e.pointerId);
-    } else if (layer) {
-      selectLayer(layer.id);
     }
   }
 });
@@ -574,33 +565,38 @@ function touchAngle(t0, t1) {
   return Math.atan2(t1.clientY - t0.clientY, t1.clientX - t0.clientX) * (180 / Math.PI);
 }
 
+function startPinch(e) {
+  const sel = getSelected();
+  if (!sel) return;
+  state.pinching = true;
+  state.dragging = false;
+  state.painting = false;
+  const t0 = e.touches[0], t1 = e.touches[1];
+  state.pinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+  state.pinchStartScale = sel.scale;
+  state.pinchStartAngle = touchAngle(t0, t1);
+  state.pinchStartRotation = sel.rotation;
+}
+
 area.addEventListener('touchstart', (e) => {
   if (e.touches.length === 2 && state.tool === 'move') {
     e.preventDefault();
-    const sel = getSelected();
-    if (!sel) return;
-    state.pinching = true;
-    state.dragging = false;
-    const t0 = e.touches[0], t1 = e.touches[1];
-    state.pinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
-    state.pinchStartScale = sel.scale;
-    state.pinchStartAngle = touchAngle(t0, t1);
-    state.pinchStartRotation = sel.rotation;
-    state.pinchMidX = (t0.clientX + t1.clientX) / 2;
-    state.pinchMidY = (t0.clientY + t1.clientY) / 2;
+    startPinch(e);
   }
 }, { passive: false });
 
 area.addEventListener('touchmove', (e) => {
-  if (state.pinching && e.touches.length === 2) {
+  if (e.touches.length === 2 && state.tool === 'move') {
     e.preventDefault();
+    // Re-init pinch if it wasn't started (finger added mid-gesture)
+    if (!state.pinching) { startPinch(e); return; }
     const sel = getSelected();
     if (!sel) return;
     const t0 = e.touches[0], t1 = e.touches[1];
     // Scale
     const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
     const ratio = dist / state.pinchStartDist;
-    sel.scale = Math.max(0.05, state.pinchStartScale * ratio);
+    sel.scale = Math.max(0.01, state.pinchStartScale * ratio);
     // Rotation
     const angle = touchAngle(t0, t1);
     sel.rotation = state.pinchStartRotation + (angle - state.pinchStartAngle);
@@ -618,7 +614,7 @@ area.addEventListener('wheel', (e) => {
   const sel = getSelected();
   if (!sel) return;
   const delta = e.deltaY > 0 ? 0.92 : 1.08;
-  sel.scale = Math.max(0.05, sel.scale * delta);
+  sel.scale = Math.max(0.01, sel.scale * delta);
   sel.canvas.style.transform = layerTransform(sel);
 }, { passive: false });
 
@@ -687,7 +683,13 @@ function toggleLayerPanel() {
 // ── Export ──
 function exportCanvas() {
   if (!state.layers.length) { toast('Nothing to export'); return; }
-  // Compute bounding box
+
+  // Export at native resolution: scale up from screen coords so the
+  // most zoomed-out layer renders at its full original pixel size.
+  const minScale = Math.min(...state.layers.map(l => l.scale));
+  let resScale = 1 / minScale;
+
+  // Bounding box in screen coords
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   state.layers.forEach(l => {
     const sw = l.canvas.width * l.scale, sh = l.canvas.height * l.scale;
@@ -701,21 +703,31 @@ function exportCanvas() {
     maxY = Math.max(maxY, cy + bh / 2);
   });
 
-  const w = Math.ceil(maxX - minX);
-  const h = Math.ceil(maxY - minY);
+  let w = Math.ceil((maxX - minX) * resScale);
+  let h = Math.ceil((maxY - minY) * resScale);
+
+  // Cap to browser canvas limit to avoid crashes
+  const MAX = 16384;
+  if (w > MAX || h > MAX) {
+    const cap = MAX / Math.max(w, h);
+    resScale *= cap;
+    w = Math.ceil((maxX - minX) * resScale);
+    h = Math.ceil((maxY - minY) * resScale);
+  }
+
   const exp = document.createElement('canvas');
   exp.width = w; exp.height = h;
   const ectx = exp.getContext('2d');
 
   state.layers.forEach(l => {
-    const dx = l.x - minX;
-    const dy = l.y - minY;
-    const sw = l.canvas.width * l.scale;
-    const sh = l.canvas.height * l.scale;
+    const dx = (l.x - minX) * resScale;
+    const dy = (l.y - minY) * resScale;
+    const dw = l.canvas.width * l.scale * resScale;
+    const dh = l.canvas.height * l.scale * resScale;
     ectx.save();
-    ectx.translate(dx + sw / 2, dy + sh / 2);
+    ectx.translate(dx + dw / 2, dy + dh / 2);
     ectx.rotate(l.rotation * Math.PI / 180);
-    ectx.drawImage(l.canvas, -sw / 2, -sh / 2, sw, sh);
+    ectx.drawImage(l.canvas, -dw / 2, -dh / 2, dw, dh);
     ectx.restore();
   });
 
@@ -723,7 +735,7 @@ function exportCanvas() {
   link.download = 'overlay-export.png';
   link.href = exp.toDataURL('image/png');
   link.click();
-  toast('Exported!');
+  toast(`Exported ${w}×${h}px`);
 }
 
 // ── Toast ──
